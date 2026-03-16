@@ -19,18 +19,18 @@ pub fn guess_state_from_name(name: &str) -> String {
     let upper = name.to_uppercase();
 
     // Check for explicit "STATE OF X" patterns first
-    if let Some(rest) = upper.strip_prefix("STATE OF ") {
-        if let Some(state) = match_state_name(rest) {
-            return state;
-        }
+    if let Some(rest) = upper.strip_prefix("STATE OF ")
+        && let Some(state) = match_state_name(rest)
+    {
+        return state;
     }
 
     // Check for state abbreviations at the end: "... TX", "... CA"
     let words: Vec<&str> = upper.split_whitespace().collect();
-    if words.len() >= 2 {
-        if let Some(state) = abbrev_to_state(words[words.len() - 1]) {
-            return state;
-        }
+    if words.len() >= 2
+        && let Some(state) = abbrev_to_state(words[words.len() - 1])
+    {
+        return state;
     }
 
     // Check for state names anywhere in the name
@@ -136,7 +136,10 @@ mod tests {
     fn test_explicit_prefix() {
         assert_eq!(guess_state_from_name("State of California"), "CA");
         assert_eq!(guess_state_from_name("State of New York"), "NY");
-        assert_eq!(guess_state_from_name("State of Texas General Obligation"), "TX");
+        assert_eq!(
+            guess_state_from_name("State of Texas General Obligation"),
+            "TX"
+        );
     }
 
     #[test]
@@ -150,20 +153,35 @@ mod tests {
     fn test_name_in_text() {
         assert_eq!(guess_state_from_name("Oregon Health Authority"), "OR");
         assert_eq!(guess_state_from_name("Connecticut Housing Finance"), "CT");
-        assert_eq!(guess_state_from_name("Massachusetts Bay Transportation"), "MA");
+        assert_eq!(
+            guess_state_from_name("Massachusetts Bay Transportation"),
+            "MA"
+        );
     }
 
     #[test]
     fn test_city() {
-        assert_eq!(guess_state_from_name("New York City Transitional Finance"), "NY");
+        assert_eq!(
+            guess_state_from_name("New York City Transitional Finance"),
+            "NY"
+        );
         assert_eq!(guess_state_from_name("Chicago Board of Education"), "IL");
-        assert_eq!(guess_state_from_name("Los Angeles Unified School District"), "CA");
+        assert_eq!(
+            guess_state_from_name("Los Angeles Unified School District"),
+            "CA"
+        );
     }
 
     #[test]
     fn test_unknown() {
-        assert_eq!(guess_state_from_name("Acalanes Union High School District"), "Unknown");
-        assert_eq!(guess_state_from_name("Generic Municipal Authority"), "Unknown");
+        assert_eq!(
+            guess_state_from_name("Acalanes Union High School District"),
+            "Unknown"
+        );
+        assert_eq!(
+            guess_state_from_name("Generic Municipal Authority"),
+            "Unknown"
+        );
     }
 
     #[test]
@@ -177,6 +195,10 @@ mod tests {
         // Verify the TOML file loads and has entries
         assert!(!REGION_TO_STATE.is_empty());
         // Check a known entry
-        assert!(REGION_TO_STATE.iter().any(|(r, s)| r == "PORTLAND" && s == "OR"));
+        assert!(
+            REGION_TO_STATE
+                .iter()
+                .any(|(r, s)| r == "PORTLAND" && s == "OR")
+        );
     }
 }
