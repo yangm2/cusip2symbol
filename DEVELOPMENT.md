@@ -244,6 +244,10 @@ This project was originally called `cusip2symbol` — a single-purpose CUSIP-to-
 
 - **`SecClient::new()` reads `SEC_CONTACT_EMAIL` at construction time**, so commands that don't hit SEC (`lookup`, `cache`) work without it. Tests set a placeholder via `unsafe { set_var(...) }` — acceptable since integration tests hit live APIs sequentially anyway.
 
+### CI / Release Actions
+
+GitHub Actions workflows live in `.github/workflows/`. The actions used (e.g., `actions/checkout`, `actions/upload-artifact`) must be kept on Node.js 24+ versions — GitHub deprecates older Node.js runtimes on a ~yearly cycle. When you see deprecation warnings in CI logs, bump the action major versions in both `ci.yml` and `release.yml`.
+
 ### Build and Run
 
 ```sh
