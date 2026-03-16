@@ -15,19 +15,38 @@ pub struct FigiResult {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum FigiResponse {
-    Success { data: Vec<FigiResult> },
+    Success {
+        data: Vec<FigiResult>,
+    },
     Warning {
         #[allow(dead_code)]
         warning: String,
     },
-    Error { error: String },
+    Error {
+        error: String,
+    },
 }
 
 pub async fn lookup_cusip(
     client: &reqwest::Client,
     cusip: &str,
 ) -> Result<Option<Vec<FigiResult>>, Box<dyn std::error::Error>> {
-    let body = serde_json::json!([{"idType": "ID_CUSIP", "idValue": cusip}]);
+    figi_lookup(client, "ID_CUSIP", cusip).await
+}
+
+pub async fn lookup_ticker(
+    client: &reqwest::Client,
+    ticker: &str,
+) -> Result<Option<Vec<FigiResult>>, Box<dyn std::error::Error>> {
+    figi_lookup(client, "TICKER", &ticker.to_uppercase()).await
+}
+
+async fn figi_lookup(
+    client: &reqwest::Client,
+    id_type: &str,
+    id_value: &str,
+) -> Result<Option<Vec<FigiResult>>, Box<dyn std::error::Error>> {
+    let body = serde_json::json!([{"idType": id_type, "idValue": id_value}]);
 
     let resp = client
         .post("https://api.openfigi.com/v3/mapping")

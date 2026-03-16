@@ -4,9 +4,9 @@
 
 ```
 src/
-  main.rs          CLI argument parsing, orchestration
+  main.rs          CLI subcommands (lookup, tax, exposure, cache)
   sec_client.rs    Rate-limited SEC HTTP client with ticker cache
-  cache.rs         Disk cache for N-PORT filings (~/.cache/cusip2symbol/)
+  cache.rs         Disk cache for N-PORT filings (~/.cache/sectool/)
   figi.rs          OpenFIGI API client
   display.rs       Terminal output formatting (tax breakdown, exposure tree)
   portfolio.rs     Portfolio TOML parser and exposure calculation
@@ -62,7 +62,7 @@ portfolio.example.toml  Example portfolio definition
 }
 ```
 
-**Caching:** The tickers list (~4MB) is fetched once per process via `tokio::sync::OnceCell` in `SecClient` and reused across all fund lookups. This is important for `--exposure`, which may look up many funds in a single run.
+**Caching:** The tickers list (~4MB) is fetched once per process via `tokio::sync::OnceCell` in `SecClient` and reused across all fund lookups. This is important for `sectool exposure`, which may look up many funds in a single run.
 
 **Limitations:**
 - Only includes mutual funds and ETFs, not individual stocks
@@ -105,8 +105,8 @@ https://www.sec.gov/Archives/edgar/data/{CIK}/{accession_no_dashes}/primary_doc.
 | `<repPdDate>` | Report period end date |
 | `<invstOrSec>` | Individual holding container |
 | `<name>` | Issuer name (used for state identification of municipal bonds) |
-| `<cusip>` | CUSIP identifier (used for `--exposure` CUSIP-based search) |
-| `<ticker>` | Ticker symbol (used for `--exposure` ticker-based search) |
+| `<cusip>` | CUSIP identifier (used for `sectool exposure` CUSIP-based search) |
+| `<ticker>` | Ticker symbol (used for `sectool exposure` ticker-based search) |
 | `<issuerCat>` | Issuer category: `UST` (Treasury), `USGA` (Gov Agency), `USGSE` (Gov Sponsored Enterprise), `MUN` (Municipal), `CORP` (Corporate), `NUSS` (Non-US Sovereign), `RF` (Registered Fund) |
 | `<issuerConditional>` | Used when issuerCat is `OTHER`; the `desc` attribute contains the sub-type (e.g., "REIT") |
 | `<pctVal>` | Percentage of net asset value (already in percent, e.g., 0.69 means 0.69%) |
@@ -128,14 +128,14 @@ https://www.sec.gov/Archives/edgar/data/{CIK}/{accession_no_dashes}/primary_doc.
 **Limitations:**
 - `pctVal` is the fund's own calculation; rounding across thousands of holdings means totals may not sum to exactly 100%
 - No state-of-issuer field for municipal bonds — we infer state from the issuer name
-- Not all holdings have `<ticker>` fields; CUSIP-based search is more reliable for `--exposure`
+- Not all holdings have `<ticker>` fields; CUSIP-based search is more reliable for `sectool exposure`
 
 ## Caching
 
-N-PORT XML files are cached on disk at `~/.cache/cusip2symbol/{TICKER}.json`. Each cache entry stores:
+N-PORT XML files are cached on disk at `~/.cache/sectool/{TICKER}.json`. Each cache entry stores:
 
 - **accession** — the SEC filing accession number, used as the cache key
-- **report_date** — the report period end date, for display in `--cache-status`
+- **report_date** — the report period end date, for display in `sectool cache status`
 - **xml** — the full N-PORT XML
 
 **Cache invalidation:** On each lookup, the Atom feed is checked for the latest accession number. If it matches the cached accession, the cached XML is returned without downloading. If a newer filing exists, it replaces the cached entry automatically. This means the Atom feed is always hit (1 SEC request), but the much larger XML download is skipped when the filing hasn't changed.
@@ -143,8 +143,8 @@ N-PORT XML files are cached on disk at `~/.cache/cusip2symbol/{TICKER}.json`. Ea
 **Cache impact on SEC requests per operation:**
 | Operation | Cache miss | Cache hit |
 |-----------|-----------|-----------|
-| `--tax` | 3 requests (tickers, Atom, XML) | 2 requests (tickers, Atom) |
-| `--exposure` (N funds) | 1 + 2N requests (tickers once, then Atom + XML per fund) | 1 + N requests (tickers once, Atom per fund) |
+| `sectool tax` | 3 requests (tickers, Atom, XML) | 2 requests (tickers, Atom) |
+| `sectool exposure` (N funds) | 1 + 2N requests (tickers once, then Atom + XML per fund) | 1 + N requests (tickers once, Atom per fund) |
 
 ## Rate Limiting
 
@@ -163,7 +163,7 @@ Instead, we use heuristic name matching on the `<name>` field, checked in priori
 3. **State name anywhere in text** — e.g., "Oregon Health Authority" -> OR
 4. **Well-known region names** from `regions.toml` — e.g., "Chicago Board of Education" -> IL
 
-Holdings that don't match any pattern are categorized as "Unknown". Use `--debug` to list these holdings (sorted by count) and identify candidates for adding to `regions.toml`.
+Holdings that don't match any pattern are categorized as "Unknown". Use `sectool tax --debug` to list these holdings (sorted by count) and identify candidates for adding to `regions.toml`.
 
 ### Adding region mappings
 
@@ -179,7 +179,7 @@ Keys are matched case-insensitively against the full issuer name. Longer keys ar
 
 ## Portfolio Exposure Analysis
 
-The `--exposure` feature computes how much of a user's portfolio is exposed to a specific security through their fund holdings.
+The `sectool exposure` command computes how much of a user's portfolio is exposed to a specific security through their fund holdings.
 
 ### Portfolio TOML format
 
@@ -205,3 +205,51 @@ cargo test
 ```
 
 Tests are co-located with their modules. Unit tests (N-PORT XML parsing, state guessing, Atom parsing, portfolio parsing, exposure calculation) run without network access. Integration tests hit the live OpenFIGI and SEC EDGAR APIs.
+
+## AI Development Context
+
+Notes for future AI-assisted coding sessions. This section captures non-obvious decisions and pitfalls that aren't derivable from the code alone.
+
+### History
+
+This project was originally called `cusip2symbol` — a single-purpose CUSIP-to-ticker lookup tool. It evolved into `sectool` with four subcommands (`lookup`, `tax`, `exposure`, `cache`). The git repo directory is still named `cusip2symbol` but the Cargo package is `sectool`.
+
+### Architectural Decisions and Rationale
+
+- **`SecClient::get()` returns `reqwest::Result<Response>`, not `Box<dyn Error>`**. Using `Box<dyn Error>` caused cascading type inference failures when chaining `.text().await?` on the response. The concrete error type keeps the async chain ergonomic.
+
+- **`SecClient` was extracted from `edgar/mod.rs`** to break a circular dependency: both `edgar` (for filing downloads) and `main` (for tickers lookup) needed rate-limited SEC access. It lives at the crate root (`sec_client.rs`) rather than inside `edgar/` so that `main.rs` can use it without reaching into the edgar module.
+
+- **Atom feed over submissions JSON for filing discovery**. The submissions endpoint (`data.sec.gov/submissions/CIK{cik}.json`) returns filings for ALL series under a CIK. For large trusts like iShares (CIK 1100663), that's hundreds of funds. The Atom feed accepts a series ID directly, returning only the target fund's filings.
+
+- **`extract_report_date()` uses string search, not XML parsing**. The full XML parse via `parse_nport_xml()` is expensive for large filings. Since we only need the report date for cache metadata, a simple `xml.find("repPdDate>")` is sufficient and avoids parsing twice (once for cache, once for the actual data).
+
+- **OpenFIGI does not support reverse CUSIP lookup**. You can look up a CUSIP to get a ticker, but not a ticker to get a CUSIP. This is why `sectool exposure` has two separate N-PORT search paths: `find_holding_pct()` (by CUSIP) and `find_holding_by_ticker()` (by ticker field). The ticker path is less reliable since not all N-PORT holdings include `<ticker>`.
+
+- **Heuristic state identification instead of CUSIP prefix ranges**. The CUSIP numbering system encodes state in the issuer prefix, but those ranges are proprietary (CUSIP Global Services / S&P Global). We use name-matching heuristics instead, with `regions.toml` as an extensible fallback.
+
+### Known Pitfalls
+
+- **SEC 403 errors**: SEC requires both a `User-Agent` header with a contact email AND `Accept-Encoding: gzip`. Missing either causes 403. The `reqwest` `gzip` feature handles the encoding; `SEC_USER_AGENT` in `main.rs` handles the user agent.
+
+- **N-PORT XML entity references**: The `quick-xml` parser emits `GeneralRef` events for XML entity references (e.g., `&amp;`) inside text fields. The XML parsing loops in `nport.rs` must handle these events alongside regular `Text` events, or issuer names containing `&` will be silently truncated.
+
+- **`pctVal` is already in percent**: A value of `0.69` means 0.69%, not 69%. No multiplication by 100 needed.
+
+- **N-PORT filing lag**: Public N-PORT filings are quarterly only (March/June/September/December period ends) with ~60 day delay. Data can be 1-3 months stale.
+
+### Known Technical Debt
+
+- **nport.rs parses all fields on every pass**: The unified `parse_nport()` collects all holding fields (name, cusip, ticker, issuerCat, pctVal) even when a caller only needs a subset. This is negligible overhead (extra string copies, not extra I/O) but could be optimized with a visitor pattern if profiling shows it matters.
+
+- **`SecClient::new()` reads `SEC_CONTACT_EMAIL` at construction time**, so commands that don't hit SEC (`lookup`, `cache`) work without it. Tests set a placeholder via `unsafe { set_var(...) }` — acceptable since integration tests hit live APIs sequentially anyway.
+
+### Build and Run
+
+```sh
+cargo build                         # debug build
+cargo install --path .              # install to ~/.cargo/bin/
+sectool lookup AAPL                 # smoke test
+sectool tax AGG                     # requires network (SEC EDGAR)
+cargo test                          # unit tests (offline) + integration tests (online)
+```

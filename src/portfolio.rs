@@ -30,9 +30,9 @@ pub struct Portfolio {
 #[derive(Debug)]
 pub struct HoldingExposure {
     pub ticker: String,
-    pub portfolio_weight: f64, // fraction of total portfolio (0..1)
+    pub portfolio_weight: f64,    // fraction of total portfolio (0..1)
     pub holding_pct: Option<f64>, // pctVal from N-PORT (already in %)
-    pub exposure_pct: f64, // portfolio_weight * holding_pct / 100
+    pub exposure_pct: f64,        // portfolio_weight * holding_pct / 100
 }
 
 /// Exposure result for a subtree.
@@ -97,9 +97,9 @@ fn parse_node(
                 let mut children = Vec::new();
                 for (ticker, alloc_val) in map {
                     let alloc = parse_allocation(
-                        alloc_val.as_str().ok_or_else(|| {
-                            format!("Expected string allocation for {ticker}")
-                        })?,
+                        alloc_val
+                            .as_str()
+                            .ok_or_else(|| format!("Expected string allocation for {ticker}"))?,
                     )?;
                     if let Allocation::Usd(usd) = alloc {
                         *total_usd += usd;

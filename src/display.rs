@@ -3,12 +3,14 @@ use crate::figi::FigiResult;
 use crate::portfolio::{ExposureNode, ExposureResult};
 use std::collections::BTreeSet;
 
-pub fn print_summary(cusip: &str, data: &[FigiResult]) {
+pub fn print_summary(cusip: Option<&str>, data: &[FigiResult]) {
     let first = &data[0];
 
     let exchanges: BTreeSet<&str> = data.iter().filter_map(|r| r.exch_code.as_deref()).collect();
 
-    println!("CUSIP:         {cusip}");
+    if let Some(cusip) = cusip {
+        println!("CUSIP:         {cusip}");
+    }
     println!(
         "Ticker:        {}",
         first.ticker.as_deref().unwrap_or("N/A")
@@ -58,10 +60,7 @@ pub fn print_tax_breakdown(b: &TaxBreakdown, selected_state: Option<&str>) {
     println!();
     println!(
         "US Government:   {:6.2}%  (Treasury {:5.2}%, Agency {:5.2}%, GSE {:5.2}%)",
-        b.us_gov_total_pct,
-        b.us_treasury_pct,
-        b.us_gov_agency_pct,
-        b.us_gov_gse_pct
+        b.us_gov_total_pct, b.us_treasury_pct, b.us_gov_agency_pct, b.us_gov_gse_pct
     );
     println!("Municipal:       {:6.2}%", b.municipal_pct);
     println!("Corporate:       {:6.2}%", b.corporate_pct);
@@ -77,19 +76,26 @@ pub fn print_tax_breakdown(b: &TaxBreakdown, selected_state: Option<&str>) {
             println!("--- Municipal Holdings by State ---");
             println!(
                 "  {:<20} {:6.2}%  ({:5.1}% of muni)",
-                state, state_pct, state_pct / b.municipal_pct * 100.0
+                state,
+                state_pct,
+                state_pct / b.municipal_pct * 100.0
             );
             println!(
                 "  {:<20} {:6.2}%  ({:5.1}% of muni)",
-                "Other states", other_pct, other_pct / b.municipal_pct * 100.0
+                "Other states",
+                other_pct,
+                other_pct / b.municipal_pct * 100.0
             );
             println!(
                 "  {:<20} {:6.2}%  ({:5.1}% of muni)",
-                "Unknown", unknown_pct, unknown_pct / b.municipal_pct * 100.0
+                "Unknown",
+                unknown_pct,
+                unknown_pct / b.municipal_pct * 100.0
             );
         } else {
             println!("--- Municipal Holdings by State ---");
             let mut sorted: Vec<(&String, &f64)> = b.municipal_by_state.iter().collect();
+            // pctVal values are parsed with unwrap_or(0.0), so NaN can't occur
             sorted.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
             for (state, pct) in &sorted {
                 if **pct >= 0.01 {

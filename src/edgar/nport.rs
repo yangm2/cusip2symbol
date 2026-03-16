@@ -4,12 +4,27 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::collections::BTreeMap;
 
-#[derive(Debug)]
-struct NportHolding {
+// --- Raw parsed data ---
+
+struct NportHeader {
+    fund_name: String,
+    report_date: String,
+}
+
+struct RawHolding {
     name: String,
+    cusip: String,
+    ticker: String,
     issuer_cat: String,
     pct_val: f64,
 }
+
+struct NportData {
+    header: NportHeader,
+    holdings: Vec<RawHolding>,
+}
+
+// --- Public types ---
 
 #[derive(Debug)]
 pub struct TaxBreakdown {
@@ -27,25 +42,31 @@ pub struct TaxBreakdown {
     pub unknown_munis: Vec<(String, usize)>,
 }
 
-pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Error>> {
+pub enum HoldingField {
+    Cusip,
+    Ticker,
+}
+
+// --- Single XML parser ---
+
+fn parse_nport(xml: &str) -> Result<NportData, Box<dyn std::error::Error>> {
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
 
     let mut fund_name = String::new();
     let mut report_date = String::new();
+    let mut holdings: Vec<RawHolding> = Vec::new();
 
-    let mut holdings: Vec<NportHolding> = Vec::new();
-
-    // Parsing state
     let mut in_gen_info = false;
     let mut in_invst = false;
     let mut current_tag = String::new();
+    let mut text_accum = String::new();
 
-    // Current holding fields
     let mut h_name = String::new();
+    let mut h_cusip = String::new();
+    let mut h_ticker = String::new();
     let mut h_issuer_cat = String::new();
     let mut h_pct_val: f64 = 0.0;
-    let mut text_accum = String::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -59,14 +80,14 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
                 } else if local == "invstOrSec" {
                     in_invst = true;
                     h_name.clear();
+                    h_cusip.clear();
+                    h_ticker.clear();
                     h_issuer_cat.clear();
                     h_pct_val = 0.0;
                 } else if local == "issuerConditional" && in_invst {
-                    // <issuerConditional desc="REIT"/> — issuerCat is in desc attr
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"desc" {
-                            h_issuer_cat =
-                                String::from_utf8_lossy(&attr.value).to_string();
+                            h_issuer_cat = String::from_utf8_lossy(&attr.value).to_string();
                         }
                     }
                 }
@@ -94,7 +115,6 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
             Ok(Event::End(ref e)) => {
                 let local = local_name(e.name().as_ref());
 
-                // Assign accumulated text to the appropriate field
                 if in_gen_info {
                     if current_tag == "seriesName" {
                         fund_name = std::mem::take(&mut text_accum);
@@ -104,6 +124,10 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
                 } else if in_invst {
                     if current_tag == "name" {
                         h_name = std::mem::take(&mut text_accum);
+                    } else if current_tag == "cusip" {
+                        h_cusip = std::mem::take(&mut text_accum);
+                    } else if current_tag == "ticker" {
+                        h_ticker = std::mem::take(&mut text_accum);
                     } else if current_tag == "issuerCat" {
                         h_issuer_cat = std::mem::take(&mut text_accum);
                     } else if current_tag == "pctVal" {
@@ -116,8 +140,10 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
                     in_gen_info = false;
                 } else if local == "invstOrSec" {
                     in_invst = false;
-                    holdings.push(NportHolding {
+                    holdings.push(RawHolding {
                         name: std::mem::take(&mut h_name),
+                        cusip: std::mem::take(&mut h_cusip),
+                        ticker: std::mem::take(&mut h_ticker),
                         issuer_cat: std::mem::take(&mut h_issuer_cat),
                         pct_val: h_pct_val,
                     });
@@ -131,7 +157,20 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
         buf.clear();
     }
 
-    // Compute breakdown
+    Ok(NportData {
+        header: NportHeader {
+            fund_name,
+            report_date,
+        },
+        holdings,
+    })
+}
+
+// --- Public API ---
+
+pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Error>> {
+    let data = parse_nport(xml)?;
+
     let mut us_treasury_pct = 0.0;
     let mut us_gov_agency_pct = 0.0;
     let mut us_gov_gse_pct = 0.0;
@@ -141,7 +180,7 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
     let mut municipal_by_state: BTreeMap<String, f64> = BTreeMap::new();
     let mut unknown_muni_counts: BTreeMap<String, usize> = BTreeMap::new();
 
-    for h in &holdings {
+    for h in &data.holdings {
         match h.issuer_cat.as_str() {
             "UST" => us_treasury_pct += h.pct_val,
             "USGA" => us_gov_agency_pct += h.pct_val,
@@ -165,9 +204,9 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
     let us_gov_total_pct = us_treasury_pct + us_gov_agency_pct + us_gov_gse_pct;
 
     Ok(TaxBreakdown {
-        report_date,
-        fund_name,
-        total_holdings: holdings.len(),
+        report_date: data.header.report_date,
+        fund_name: data.header.fund_name,
+        total_holdings: data.holdings.len(),
         us_treasury_pct,
         us_gov_agency_pct,
         us_gov_gse_pct,
@@ -180,181 +219,30 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
     })
 }
 
-/// Search an N-PORT XML for a specific CUSIP and return its percentage of net assets.
-/// Returns (name, total_pct) where total_pct is the sum of all holdings matching the CUSIP.
-pub fn find_holding_pct(xml: &str, target_cusip: &str) -> Result<Option<(String, f64)>, Box<dyn std::error::Error>> {
-    let mut reader = Reader::from_str(xml);
-    let mut buf = Vec::new();
-
-    let mut in_invst = false;
-    let mut current_tag = String::new();
-    let mut text_accum = String::new();
-
-    let mut h_name = String::new();
-    let mut h_cusip = String::new();
-    let mut h_pct_val: f64 = 0.0;
+/// Search an N-PORT XML for a holding by CUSIP or ticker.
+/// Returns (name, total_pct) where total_pct is the sum of all matching holdings.
+pub fn find_holding(
+    xml: &str,
+    field: HoldingField,
+    target: &str,
+) -> Result<Option<(String, f64)>, Box<dyn std::error::Error>> {
+    let data = parse_nport(xml)?;
+    let target_upper = target.to_uppercase();
 
     let mut total_pct = 0.0;
     let mut found_name = String::new();
 
-    let target_upper = target_cusip.to_uppercase();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let local = local_name(e.name().as_ref());
-                current_tag = local.clone();
-                text_accum.clear();
-
-                if local == "invstOrSec" {
-                    in_invst = true;
-                    h_name.clear();
-                    h_cusip.clear();
-                    h_pct_val = 0.0;
-                }
+    for h in &data.holdings {
+        let value = match field {
+            HoldingField::Cusip => &h.cusip,
+            HoldingField::Ticker => &h.ticker,
+        };
+        if value.to_uppercase() == target_upper {
+            total_pct += h.pct_val;
+            if found_name.is_empty() {
+                found_name = h.name.clone();
             }
-            Ok(Event::Text(ref e)) => {
-                if let Ok(text) = e.decode() {
-                    text_accum.push_str(&text);
-                }
-            }
-            Ok(Event::GeneralRef(ref e)) => {
-                let bytes: &[u8] = e.as_ref();
-                match bytes {
-                    b"amp" => text_accum.push('&'),
-                    b"lt" => text_accum.push('<'),
-                    b"gt" => text_accum.push('>'),
-                    b"apos" => text_accum.push('\''),
-                    b"quot" => text_accum.push('"'),
-                    other => {
-                        text_accum.push('&');
-                        text_accum.push_str(&String::from_utf8_lossy(other));
-                        text_accum.push(';');
-                    }
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                let local = local_name(e.name().as_ref());
-
-                if in_invst {
-                    if current_tag == "name" {
-                        h_name = std::mem::take(&mut text_accum);
-                    } else if current_tag == "cusip" {
-                        h_cusip = std::mem::take(&mut text_accum);
-                    } else if current_tag == "pctVal" {
-                        h_pct_val = text_accum.parse().unwrap_or(0.0);
-                    }
-                }
-                text_accum.clear();
-
-                if local == "invstOrSec" {
-                    in_invst = false;
-                    if h_cusip.to_uppercase() == target_upper {
-                        total_pct += h_pct_val;
-                        if found_name.is_empty() {
-                            found_name = h_name.clone();
-                        }
-                    }
-                }
-                current_tag.clear();
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("N-PORT XML parse error: {e}").into()),
-            _ => {}
         }
-        buf.clear();
-    }
-
-    if total_pct > 0.0 {
-        Ok(Some((found_name, total_pct)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Search an N-PORT XML for a specific ticker symbol.
-/// Returns (name, total_pct) where total_pct is the sum of all holdings matching the ticker.
-pub fn find_holding_by_ticker(xml: &str, target_ticker: &str) -> Result<Option<(String, f64)>, Box<dyn std::error::Error>> {
-    let mut reader = Reader::from_str(xml);
-    let mut buf = Vec::new();
-
-    let mut in_invst = false;
-    let mut current_tag = String::new();
-    let mut text_accum = String::new();
-
-    let mut h_name = String::new();
-    let mut h_ticker = String::new();
-    let mut h_pct_val: f64 = 0.0;
-
-    let mut total_pct = 0.0;
-    let mut found_name = String::new();
-
-    let target_upper = target_ticker.to_uppercase();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let local = local_name(e.name().as_ref());
-                current_tag = local.clone();
-                text_accum.clear();
-
-                if local == "invstOrSec" {
-                    in_invst = true;
-                    h_name.clear();
-                    h_ticker.clear();
-                    h_pct_val = 0.0;
-                }
-            }
-            Ok(Event::Text(ref e)) => {
-                if let Ok(text) = e.decode() {
-                    text_accum.push_str(&text);
-                }
-            }
-            Ok(Event::GeneralRef(ref e)) => {
-                let bytes: &[u8] = e.as_ref();
-                match bytes {
-                    b"amp" => text_accum.push('&'),
-                    b"lt" => text_accum.push('<'),
-                    b"gt" => text_accum.push('>'),
-                    b"apos" => text_accum.push('\''),
-                    b"quot" => text_accum.push('"'),
-                    other => {
-                        text_accum.push('&');
-                        text_accum.push_str(&String::from_utf8_lossy(other));
-                        text_accum.push(';');
-                    }
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                let local = local_name(e.name().as_ref());
-
-                if in_invst {
-                    if current_tag == "name" {
-                        h_name = std::mem::take(&mut text_accum);
-                    } else if current_tag == "ticker" {
-                        h_ticker = std::mem::take(&mut text_accum);
-                    } else if current_tag == "pctVal" {
-                        h_pct_val = text_accum.parse().unwrap_or(0.0);
-                    }
-                }
-                text_accum.clear();
-
-                if local == "invstOrSec" {
-                    in_invst = false;
-                    if h_ticker.to_uppercase() == target_upper {
-                        total_pct += h_pct_val;
-                        if found_name.is_empty() {
-                            found_name = h_name.clone();
-                        }
-                    }
-                }
-                current_tag.clear();
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("N-PORT XML parse error: {e}").into()),
-            _ => {}
-        }
-        buf.clear();
     }
 
     if total_pct > 0.0 {
@@ -496,5 +384,75 @@ mod tests {
         let b = parse_nport_xml(xml).unwrap();
         assert_eq!(b.total_holdings, 1);
         assert!((b.other_pct - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_find_holding_by_cusip() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
+          <formData>
+            <genInfo>
+              <seriesName>Test Fund</seriesName>
+              <repPdDate>2025-12-31</repPdDate>
+            </genInfo>
+            <invstOrSecs>
+              <invstOrSec>
+                <name>APPLE INC</name>
+                <cusip>037833100</cusip>
+                <ticker>AAPL</ticker>
+                <issuerCat>CORP</issuerCat>
+                <pctVal>5.00</pctVal>
+              </invstOrSec>
+              <invstOrSec>
+                <name>MICROSOFT CORP</name>
+                <cusip>594918104</cusip>
+                <ticker>MSFT</ticker>
+                <issuerCat>CORP</issuerCat>
+                <pctVal>4.00</pctVal>
+              </invstOrSec>
+            </invstOrSecs>
+          </formData>
+        </edgarSubmission>"#;
+
+        let result = find_holding(xml, HoldingField::Cusip, "037833100").unwrap();
+        let (name, pct) = result.unwrap();
+        assert_eq!(name, "APPLE INC");
+        assert!((pct - 5.0).abs() < 0.01);
+
+        let result = find_holding(xml, HoldingField::Cusip, "999999999").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_holding_by_ticker() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
+          <formData>
+            <genInfo>
+              <seriesName>Test Fund</seriesName>
+              <repPdDate>2025-12-31</repPdDate>
+            </genInfo>
+            <invstOrSecs>
+              <invstOrSec>
+                <name>APPLE INC</name>
+                <cusip>037833100</cusip>
+                <ticker>AAPL</ticker>
+                <issuerCat>CORP</issuerCat>
+                <pctVal>5.00</pctVal>
+              </invstOrSec>
+            </invstOrSecs>
+          </formData>
+        </edgarSubmission>"#;
+
+        let result = find_holding(xml, HoldingField::Ticker, "AAPL").unwrap();
+        let (name, pct) = result.unwrap();
+        assert_eq!(name, "APPLE INC");
+        assert!((pct - 5.0).abs() < 0.01);
+
+        let result = find_holding(xml, HoldingField::Ticker, "aapl").unwrap();
+        assert!(result.is_some(), "should be case-insensitive");
+
+        let result = find_holding(xml, HoldingField::Ticker, "ZZZZ").unwrap();
+        assert!(result.is_none());
     }
 }

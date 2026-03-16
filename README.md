@@ -1,6 +1,8 @@
-# cusip2symbol
+# sectool
 
-A command-line tool to look up security information by CUSIP or ticker symbol, with tax-relevant holdings breakdowns and portfolio exposure analysis for mutual funds and ETFs.
+[![CI](https://github.com/yangm2/cusip2symbol/actions/workflows/ci.yml/badge.svg)](https://github.com/yangm2/cusip2symbol/actions/workflows/ci.yml)
+
+Security lookup, tax breakdown, and portfolio exposure tools for the command line.
 
 ## Installation
 
@@ -8,12 +10,24 @@ A command-line tool to look up security information by CUSIP or ticker symbol, w
 cargo install --path .
 ```
 
-## Usage
+## Setup
 
-### Basic lookup by CUSIP
+Commands that access SEC EDGAR (`tax`, `exposure`) require a contact email per SEC's [fair access policy](https://www.sec.gov/os/webmaster-faq#developers):
 
 ```sh
-cusip2symbol 037833100
+export SEC_CONTACT_EMAIL=you@example.com
+```
+
+The `lookup` and `cache` commands do not require this.
+
+## Commands
+
+### `sectool lookup` — Security information
+
+Look up a security by CUSIP or ticker symbol via OpenFIGI.
+
+```sh
+sectool lookup 037833100
 ```
 
 ```
@@ -26,18 +40,29 @@ Security Type: Common Stock
 Exchanges:     UA, UB, UC, UD, ...
 ```
 
-### Lookup by ticker
-
 ```sh
-cusip2symbol AAPL
+sectool lookup AAPL
 ```
 
-### Tax-relevant holdings breakdown
+```
+Ticker:        AAPL
+Name:          APPLE INC
+FIGI:          BBG000B9XRY4
+...
+```
 
-Use `--tax` to fetch the fund's latest SEC N-PORT filing and compute a breakdown by issuer category:
+Use `--all` to show every exchange listing:
 
 ```sh
-cusip2symbol --tax AGG
+sectool lookup --all 037833100
+```
+
+### `sectool tax` — Holdings breakdown
+
+Fetch a fund's latest SEC N-PORT filing and compute a tax-relevant breakdown by issuer category.
+
+```sh
+sectool tax AGG
 ```
 
 ```
@@ -57,12 +82,10 @@ Other:             6.56%
   ...
 ```
 
-### State-specific municipal summary
-
-Use `--state` to summarize municipal holdings for a specific state (implies `--tax`):
+Filter municipal holdings for a specific state:
 
 ```sh
-cusip2symbol --state OR MUB
+sectool tax MUB --state OR
 ```
 
 ```
@@ -72,20 +95,18 @@ cusip2symbol --state OR MUB
   Unknown               26.48%  ( 26.6% of muni)
 ```
 
-### Debug unknown municipal issuers
-
-Use `--debug` to list municipal holdings that couldn't be mapped to a state:
+List municipal holdings that couldn't be mapped to a state:
 
 ```sh
-cusip2symbol --tax --debug MUB
+sectool tax MUB --debug
 ```
 
-### Portfolio exposure analysis
+### `sectool exposure` — Portfolio exposure
 
-Use `--exposure` with a portfolio TOML file to compute how much of your portfolio is exposed to a specific security across all your funds:
+Compute how much of your portfolio is exposed to a specific security across all your funds.
 
 ```sh
-cusip2symbol NVDA --exposure portfolio.toml
+sectool exposure NVDA portfolio.toml
 ```
 
 ```
@@ -107,11 +128,11 @@ Taxable Brokerage                    1.520%
 Total Exposure:  4.360%
 ```
 
-The target security can be specified as a ticker (searches N-PORT `<ticker>` fields) or a CUSIP (searches N-PORT `<cusip>` fields).
+The target can be a ticker (searches N-PORT `<ticker>` fields) or a CUSIP (searches `<cusip>` fields).
 
 #### Portfolio TOML format
 
-The portfolio file uses a tree hierarchy where top-level groups represent account types and subtrees provide intermediate exposure rollups. Leaf values are `"$N"` for USD amounts or `"N%"` for percentages:
+The portfolio file uses a tree hierarchy. Top-level groups represent account types with different tax treatments; subtrees provide intermediate exposure rollups. Leaf values are `"$N"` for USD amounts or `"N%"` for percentages:
 
 ```toml
 ["Tax-Deferred (401k)"."US Equity"]
@@ -133,18 +154,12 @@ MUB  = "$50000"
 
 See `portfolio.example.toml` for a complete example.
 
-### All exchange listings
+### `sectool cache` — Cache management
+
+N-PORT filings are cached locally in `~/.cache/sectool/` to avoid redundant SEC downloads. The cache is keyed by filing accession number and automatically refreshed when a newer filing is available.
 
 ```sh
-cusip2symbol --all 037833100
-```
-
-### Cache status
-
-N-PORT filings are cached locally in `~/.cache/cusip2symbol/` to avoid redundant SEC downloads. The cache is keyed by filing accession number and automatically refreshed when a newer filing is available.
-
-```sh
-cusip2symbol --cache-status
+sectool cache status
 ```
 
 ```
@@ -156,16 +171,9 @@ MUB      0002071691-26-001301     2025-11-30
 3 cached filing(s)
 ```
 
-## Options
-
-| Flag | Description |
-|------|-------------|
-| `-a`, `--all` | Show all exchange listings instead of a summary |
-| `-t`, `--tax` | Show tax-relevant holdings breakdown from SEC N-PORT filings |
-| `-s`, `--state <ST>` | State abbreviation for municipal tax summary (e.g. OR, CA, NY); implies `--tax` |
-| `-d`, `--debug` | List municipal holdings with unknown state identification; implies `--tax` |
-| `-e`, `--exposure <FILE>` | Compute portfolio exposure to the target security using a portfolio TOML file |
-| `--cache-status` | Show cached N-PORT filings |
+```sh
+sectool cache clear
+```
 
 ## Rate Limiting
 

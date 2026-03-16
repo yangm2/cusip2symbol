@@ -1,9 +1,9 @@
 mod nport;
 mod states;
 
+pub use nport::HoldingField;
 pub use nport::TaxBreakdown;
-pub use nport::find_holding_by_ticker;
-pub use nport::find_holding_pct;
+pub use nport::find_holding;
 
 use crate::sec_client::{FundInfo, SecClient};
 use nport::parse_nport_xml;
@@ -133,7 +133,12 @@ mod tests {
     use super::*;
 
     fn test_sec_client() -> SecClient {
-        SecClient::new(crate::build_client())
+        // Tests need a contact email; use a placeholder if not set
+        if std::env::var("SEC_CONTACT_EMAIL").is_err() {
+            // SAFETY: tests are run with --test-threads=1 for SEC rate limiting anyway
+            unsafe { std::env::set_var("SEC_CONTACT_EMAIL", "sectool-test@example.com") };
+        }
+        SecClient::new().expect("Failed to build SecClient")
     }
 
     #[test]

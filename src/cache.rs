@@ -11,7 +11,7 @@ struct CacheEntry {
 
 fn cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".cache").join("cusip2symbol")
+    PathBuf::from(home).join(".cache").join("sectool")
 }
 
 fn cache_path(ticker: &str) -> PathBuf {
@@ -54,21 +54,29 @@ pub fn list_entries() -> Vec<(String, String, String)> {
     if let Ok(read_dir) = fs::read_dir(&dir) {
         for entry in read_dir.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Some(ticker) = path.file_stem().and_then(|s| s.to_str()) {
-                    if let Ok(data) = fs::read_to_string(&path) {
-                        if let Ok(ce) = serde_json::from_str::<CacheEntry>(&data) {
-                            entries.push((
-                                ticker.to_string(),
-                                ce.accession,
-                                ce.report_date,
-                            ));
-                        }
-                    }
-                }
+            if path.extension().and_then(|e| e.to_str()) == Some("json")
+                && let Some(ticker) = path.file_stem().and_then(|s| s.to_str())
+                && let Ok(data) = fs::read_to_string(&path)
+                && let Ok(ce) = serde_json::from_str::<CacheEntry>(&data)
+            {
+                entries.push((ticker.to_string(), ce.accession, ce.report_date));
             }
         }
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries
+}
+
+/// Remove all cached entries.
+pub fn clear() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = cache_dir();
+    if dir.exists() {
+        for entry in fs::read_dir(&dir)?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                fs::remove_file(&path)?;
+            }
+        }
+    }
+    Ok(())
 }

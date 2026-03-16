@@ -28,18 +28,26 @@ const SEC_RATE_LIMIT: usize = 8; // stay under SEC's 10/sec limit
 const SEC_RATE_WINDOW: Duration = Duration::from_secs(1);
 
 impl SecClient {
-    pub fn new(http: reqwest::Client) -> Self {
-        Self {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let email = std::env::var("SEC_CONTACT_EMAIL").map_err(|_| {
+            "SEC_CONTACT_EMAIL environment variable is required.\n\
+             Set it to your email address (SEC fair access policy):\n  \
+             export SEC_CONTACT_EMAIL=you@example.com"
+        })?;
+        let user_agent = format!("sectool {email}");
+        let http = reqwest::Client::builder().user_agent(user_agent).build()?;
+        Ok(Self {
             http,
             recent_requests: Mutex::new(Vec::new()),
             mf_tickers: tokio::sync::OnceCell::new(),
-        }
+        })
     }
 
     /// Rate-limited GET request to SEC.
     pub async fn get(&self, url: &str) -> reqwest::Result<reqwest::Response> {
         loop {
             let wait = {
+                // Lock is held briefly with no panicking code inside; poisoning can't happen
                 let mut recent = self.recent_requests.lock().unwrap();
                 let now = Instant::now();
                 recent.retain(|&t| now.duration_since(t) < SEC_RATE_WINDOW);
@@ -57,7 +65,7 @@ impl SecClient {
             }
         }
 
-        Ok(self.http.get(url).send().await?)
+        self.http.get(url).send().await
     }
 
     /// Look up fund info (CIK + series ID) by ticker. Caches the tickers list.
