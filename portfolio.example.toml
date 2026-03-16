@@ -1,0 +1,35 @@
+# Example portfolio definition.
+# Table paths define a tree hierarchy for intermediate exposure reporting.
+# Leaf values are securities with allocations: "$N" for USD or "N%" for percentage.
+#
+# Top-level groups reflect account types with different tax treatments.
+# Subtrees let you see intermediate exposure rollups (e.g. "how much NVDA
+# exposure do I have in my tax-deferred accounts?").
+
+["Tax-Deferred (401k)"."US Equity"]
+VTI  = "$120000"
+QQQ  = "$40000"
+
+["Tax-Deferred (401k)"."International"]
+VXUS = "$30000"
+
+["Tax-Deferred (401k)"."Fixed Income"]
+AGG  = "$60000"
+
+["Tax-Exempt (Roth IRA)"."Growth"]
+VUG  = "$35000"
+ARKK = "$10000"
+
+["Tax-Exempt (Roth IRA)"."Income"]
+SCHD = "$15000"
+
+["Taxable Brokerage"."Core"]
+IVV  = "$80000"
+VXUS = "$20000"
+
+["Taxable Brokerage"."Sector"]
+XLK  = "$15000"
+XLV  = "$10000"
+
+["Taxable Brokerage"."Municipal Bonds"]
+MUB  = "$50000"

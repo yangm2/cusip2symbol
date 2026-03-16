@@ -4,13 +4,19 @@
 
 ```
 src/
-  main.rs          CLI argument parsing, orchestration, HTTP client setup
+  main.rs          CLI argument parsing, orchestration
+  sec_client.rs    Rate-limited SEC HTTP client with ticker cache
+  cache.rs         Disk cache for N-PORT filings (~/.cache/cusip2symbol/)
   figi.rs          OpenFIGI API client
-  display.rs       Terminal output formatting
+  display.rs       Terminal output formatting (tax breakdown, exposure tree)
+  portfolio.rs     Portfolio TOML parser and exposure calculation
   edgar/
-    mod.rs         SEC EDGAR fund lookup and filing discovery
-    nport.rs       N-PORT XML parser and TaxBreakdown computation
+    mod.rs         EDGAR filing discovery and N-PORT download orchestration
+    nport.rs       N-PORT XML parser: TaxBreakdown, CUSIP/ticker search
     states.rs      Heuristic state identification from municipal bond issuer names
+regions.toml       City/region to state mapping (compiled into binary)
+build.rs           Tells cargo to rebuild when regions.toml changes
+portfolio.example.toml  Example portfolio definition
 ```
 
 ## APIs Used
@@ -56,6 +62,8 @@ src/
 }
 ```
 
+**Caching:** The tickers list (~4MB) is fetched once per process via `tokio::sync::OnceCell` in `SecClient` and reused across all fund lookups. This is important for `--exposure`, which may look up many funds in a single run.
+
 **Limitations:**
 - Only includes mutual funds and ETFs, not individual stocks
 - Does not include CUSIPs (hence the need for OpenFIGI as a first step)
@@ -97,6 +105,8 @@ https://www.sec.gov/Archives/edgar/data/{CIK}/{accession_no_dashes}/primary_doc.
 | `<repPdDate>` | Report period end date |
 | `<invstOrSec>` | Individual holding container |
 | `<name>` | Issuer name (used for state identification of municipal bonds) |
+| `<cusip>` | CUSIP identifier (used for `--exposure` CUSIP-based search) |
+| `<ticker>` | Ticker symbol (used for `--exposure` ticker-based search) |
 | `<issuerCat>` | Issuer category: `UST` (Treasury), `USGA` (Gov Agency), `USGSE` (Gov Sponsored Enterprise), `MUN` (Municipal), `CORP` (Corporate), `NUSS` (Non-US Sovereign), `RF` (Registered Fund) |
 | `<issuerConditional>` | Used when issuerCat is `OTHER`; the `desc` attribute contains the sub-type (e.g., "REIT") |
 | `<pctVal>` | Percentage of net asset value (already in percent, e.g., 0.69 means 0.69%) |
@@ -105,10 +115,42 @@ https://www.sec.gov/Archives/edgar/data/{CIK}/{accession_no_dashes}/primary_doc.
 - Sum `pctVal` by `issuerCat` to get US Government (UST + USGA + USGSE), Municipal, Corporate, and Other percentages
 - For municipal holdings, infer the state from the `<name>` field using heuristics (see below)
 
+**How we compute exposure:**
+- For each fund in the portfolio, search its N-PORT for the target security by CUSIP or ticker
+- Sum `pctVal` across all matching holdings within each fund
+- Multiply by the fund's portfolio weight to get effective exposure
+
+**Filing frequency:**
+- N-PORTs are filed monthly but only quarterly filings (March, June, September, December period ends) are made public
+- There is a ~60 day delay between the report period end and public availability
+- Data may be 1-3 months old at any given time
+
 **Limitations:**
 - `pctVal` is the fund's own calculation; rounding across thousands of holdings means totals may not sum to exactly 100%
 - No state-of-issuer field for municipal bonds — we infer state from the issuer name
-- Filed monthly but with a ~60 day delay, so data may be 1-3 months old
+- Not all holdings have `<ticker>` fields; CUSIP-based search is more reliable for `--exposure`
+
+## Caching
+
+N-PORT XML files are cached on disk at `~/.cache/cusip2symbol/{TICKER}.json`. Each cache entry stores:
+
+- **accession** — the SEC filing accession number, used as the cache key
+- **report_date** — the report period end date, for display in `--cache-status`
+- **xml** — the full N-PORT XML
+
+**Cache invalidation:** On each lookup, the Atom feed is checked for the latest accession number. If it matches the cached accession, the cached XML is returned without downloading. If a newer filing exists, it replaces the cached entry automatically. This means the Atom feed is always hit (1 SEC request), but the much larger XML download is skipped when the filing hasn't changed.
+
+**Cache impact on SEC requests per operation:**
+| Operation | Cache miss | Cache hit |
+|-----------|-----------|-----------|
+| `--tax` | 3 requests (tickers, Atom, XML) | 2 requests (tickers, Atom) |
+| `--exposure` (N funds) | 1 + 2N requests (tickers once, then Atom + XML per fund) | 1 + N requests (tickers once, Atom per fund) |
+
+## Rate Limiting
+
+The SEC enforces a limit of 10 requests per second and requires a `User-Agent` header with a contact email. Repeated violations result in temporary IP blocks.
+
+`SecClient` implements a sliding-window rate limiter that caps SEC requests to 8/sec (staying safely under the 10/sec limit). All SEC HTTP requests go through `SecClient::get()`, which tracks timestamps and sleeps when the window is full. Non-SEC requests (e.g., OpenFIGI) bypass the rate limiter.
 
 ## State Identification for Municipal Bonds
 
@@ -116,12 +158,45 @@ N-PORT filings do not include a state field for municipal bond holdings. The CUS
 
 Instead, we use heuristic name matching on the `<name>` field, checked in priority order:
 
-1. **"State of X" prefix** — e.g., "State of California" → CA
-2. **State abbreviation as last word** — e.g., "Harris County TX" → TX
-3. **State name anywhere in text** — e.g., "Oregon Health Authority" → OR
-4. **Well-known city names** — e.g., "Chicago Board of Education" → IL
+1. **"State of X" prefix** — e.g., "State of California" -> CA
+2. **State abbreviation as last word** — e.g., "Harris County TX" -> TX
+3. **State name anywhere in text** — e.g., "Oregon Health Authority" -> OR
+4. **Well-known region names** from `regions.toml` — e.g., "Chicago Board of Education" -> IL
 
-Holdings that don't match any pattern are categorized as "Unknown". For the iShares National Muni Bond ETF (MUB), roughly 26% of holdings fall into this category. These are typically county-level or special-purpose issuers whose names don't contain state identifiers (e.g., "Acalanes Union High School District").
+Holdings that don't match any pattern are categorized as "Unknown". Use `--debug` to list these holdings (sorted by count) and identify candidates for adding to `regions.toml`.
+
+### Adding region mappings
+
+Edit `regions.toml` to add city, county, or other regional identifiers:
+
+```toml
+[regions]
+"SEATTLE" = "WA"
+"COUNTY OF MULTNOMAH" = "OR"
+```
+
+Keys are matched case-insensitively against the full issuer name. Longer keys are matched first to avoid false positives. The file is compiled into the binary via `include_str!`, with `build.rs` ensuring recompilation when the file changes.
+
+## Portfolio Exposure Analysis
+
+The `--exposure` feature computes how much of a user's portfolio is exposed to a specific security through their fund holdings.
+
+### Portfolio TOML format
+
+The TOML file defines a tree hierarchy:
+- **Interior nodes** (TOML tables) define groups for intermediate rollups
+- **Leaf values** (strings) are fund tickers with allocations: `"$N"` for USD or `"N%"` for percentage
+
+USD allocations are normalized to portfolio weights at runtime. The tree structure is preserved in the output so users can see exposure broken down by account type, asset class, or any custom grouping.
+
+### Calculation
+
+For each leaf fund:
+1. Download its latest N-PORT filing (via cache when possible)
+2. Search all holdings for the target security by CUSIP or ticker
+3. Sum `pctVal` across matching holdings to get the fund's allocation percentage
+4. Multiply by the fund's portfolio weight to get effective exposure
+5. Roll up exposure through the tree hierarchy for group subtotals
 
 ## Testing
 
@@ -129,8 +204,4 @@ Holdings that don't match any pattern are categorized as "Unknown". For the iSha
 cargo test
 ```
 
-Tests are co-located with their modules. Unit tests (N-PORT XML parsing, state guessing, Atom parsing) run without network access. Integration tests hit the live OpenFIGI and SEC EDGAR APIs.
-
-## SEC Rate Limiting
-
-The SEC enforces a rate limit of 10 requests per second and requires a `User-Agent` header identifying the caller with a contact email. Repeated violations result in temporary IP blocks. The tool makes at most 3 SEC requests per invocation (tickers JSON, Atom feed, N-PORT XML).
+Tests are co-located with their modules. Unit tests (N-PORT XML parsing, state guessing, Atom parsing, portfolio parsing, exposure calculation) run without network access. Integration tests hit the live OpenFIGI and SEC EDGAR APIs.

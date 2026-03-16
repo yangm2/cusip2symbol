@@ -180,6 +180,190 @@ pub fn parse_nport_xml(xml: &str) -> Result<TaxBreakdown, Box<dyn std::error::Er
     })
 }
 
+/// Search an N-PORT XML for a specific CUSIP and return its percentage of net assets.
+/// Returns (name, total_pct) where total_pct is the sum of all holdings matching the CUSIP.
+pub fn find_holding_pct(xml: &str, target_cusip: &str) -> Result<Option<(String, f64)>, Box<dyn std::error::Error>> {
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+
+    let mut in_invst = false;
+    let mut current_tag = String::new();
+    let mut text_accum = String::new();
+
+    let mut h_name = String::new();
+    let mut h_cusip = String::new();
+    let mut h_pct_val: f64 = 0.0;
+
+    let mut total_pct = 0.0;
+    let mut found_name = String::new();
+
+    let target_upper = target_cusip.to_uppercase();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let local = local_name(e.name().as_ref());
+                current_tag = local.clone();
+                text_accum.clear();
+
+                if local == "invstOrSec" {
+                    in_invst = true;
+                    h_name.clear();
+                    h_cusip.clear();
+                    h_pct_val = 0.0;
+                }
+            }
+            Ok(Event::Text(ref e)) => {
+                if let Ok(text) = e.decode() {
+                    text_accum.push_str(&text);
+                }
+            }
+            Ok(Event::GeneralRef(ref e)) => {
+                let bytes: &[u8] = e.as_ref();
+                match bytes {
+                    b"amp" => text_accum.push('&'),
+                    b"lt" => text_accum.push('<'),
+                    b"gt" => text_accum.push('>'),
+                    b"apos" => text_accum.push('\''),
+                    b"quot" => text_accum.push('"'),
+                    other => {
+                        text_accum.push('&');
+                        text_accum.push_str(&String::from_utf8_lossy(other));
+                        text_accum.push(';');
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let local = local_name(e.name().as_ref());
+
+                if in_invst {
+                    if current_tag == "name" {
+                        h_name = std::mem::take(&mut text_accum);
+                    } else if current_tag == "cusip" {
+                        h_cusip = std::mem::take(&mut text_accum);
+                    } else if current_tag == "pctVal" {
+                        h_pct_val = text_accum.parse().unwrap_or(0.0);
+                    }
+                }
+                text_accum.clear();
+
+                if local == "invstOrSec" {
+                    in_invst = false;
+                    if h_cusip.to_uppercase() == target_upper {
+                        total_pct += h_pct_val;
+                        if found_name.is_empty() {
+                            found_name = h_name.clone();
+                        }
+                    }
+                }
+                current_tag.clear();
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("N-PORT XML parse error: {e}").into()),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    if total_pct > 0.0 {
+        Ok(Some((found_name, total_pct)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Search an N-PORT XML for a specific ticker symbol.
+/// Returns (name, total_pct) where total_pct is the sum of all holdings matching the ticker.
+pub fn find_holding_by_ticker(xml: &str, target_ticker: &str) -> Result<Option<(String, f64)>, Box<dyn std::error::Error>> {
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+
+    let mut in_invst = false;
+    let mut current_tag = String::new();
+    let mut text_accum = String::new();
+
+    let mut h_name = String::new();
+    let mut h_ticker = String::new();
+    let mut h_pct_val: f64 = 0.0;
+
+    let mut total_pct = 0.0;
+    let mut found_name = String::new();
+
+    let target_upper = target_ticker.to_uppercase();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let local = local_name(e.name().as_ref());
+                current_tag = local.clone();
+                text_accum.clear();
+
+                if local == "invstOrSec" {
+                    in_invst = true;
+                    h_name.clear();
+                    h_ticker.clear();
+                    h_pct_val = 0.0;
+                }
+            }
+            Ok(Event::Text(ref e)) => {
+                if let Ok(text) = e.decode() {
+                    text_accum.push_str(&text);
+                }
+            }
+            Ok(Event::GeneralRef(ref e)) => {
+                let bytes: &[u8] = e.as_ref();
+                match bytes {
+                    b"amp" => text_accum.push('&'),
+                    b"lt" => text_accum.push('<'),
+                    b"gt" => text_accum.push('>'),
+                    b"apos" => text_accum.push('\''),
+                    b"quot" => text_accum.push('"'),
+                    other => {
+                        text_accum.push('&');
+                        text_accum.push_str(&String::from_utf8_lossy(other));
+                        text_accum.push(';');
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let local = local_name(e.name().as_ref());
+
+                if in_invst {
+                    if current_tag == "name" {
+                        h_name = std::mem::take(&mut text_accum);
+                    } else if current_tag == "ticker" {
+                        h_ticker = std::mem::take(&mut text_accum);
+                    } else if current_tag == "pctVal" {
+                        h_pct_val = text_accum.parse().unwrap_or(0.0);
+                    }
+                }
+                text_accum.clear();
+
+                if local == "invstOrSec" {
+                    in_invst = false;
+                    if h_ticker.to_uppercase() == target_upper {
+                        total_pct += h_pct_val;
+                        if found_name.is_empty() {
+                            found_name = h_name.clone();
+                        }
+                    }
+                }
+                current_tag.clear();
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("N-PORT XML parse error: {e}").into()),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    if total_pct > 0.0 {
+        Ok(Some((found_name, total_pct)))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,5 +1,6 @@
 use crate::edgar::TaxBreakdown;
 use crate::figi::FigiResult;
+use crate::portfolio::{ExposureNode, ExposureResult};
 use std::collections::BTreeSet;
 
 pub fn print_summary(cusip: &str, data: &[FigiResult]) {
@@ -97,6 +98,57 @@ pub fn print_tax_breakdown(b: &TaxBreakdown, selected_state: Option<&str>) {
                         state,
                         **pct,
                         **pct / b.municipal_pct * 100.0
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub fn print_exposure(target: &str, results: &[ExposureResult]) {
+    let total: f64 = results
+        .iter()
+        .map(|r| match r {
+            ExposureResult::Group(g) => g.exposure_pct,
+            ExposureResult::Leaf(l) => l.exposure_pct,
+        })
+        .sum();
+
+    println!("=== Portfolio Exposure to {target} ===");
+    println!();
+    for result in results {
+        print_exposure_node(result, 0);
+    }
+    println!();
+    println!("Total Exposure:  {total:6.3}%");
+}
+
+fn print_exposure_node(result: &ExposureResult, depth: usize) {
+    let indent = "  ".repeat(depth);
+    match result {
+        ExposureResult::Group(ExposureNode {
+            name,
+            exposure_pct,
+            children,
+        }) => {
+            println!("{indent}{name:<30} {:>8.3}%", exposure_pct);
+            for child in children {
+                print_exposure_node(child, depth + 1);
+            }
+        }
+        ExposureResult::Leaf(h) => {
+            let weight_pct = h.portfolio_weight * 100.0;
+            match h.holding_pct {
+                Some(pct) => {
+                    println!(
+                        "{indent}{:<30} {:>8.3}%  (wt {:5.1}% x hold {:5.2}%)",
+                        h.ticker, h.exposure_pct, weight_pct, pct
+                    );
+                }
+                None => {
+                    println!(
+                        "{indent}{:<30} {:>8.3}%  (wt {:5.1}%, no N-PORT)",
+                        h.ticker, h.exposure_pct, weight_pct
                     );
                 }
             }

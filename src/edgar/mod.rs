@@ -2,56 +2,50 @@ mod nport;
 mod states;
 
 pub use nport::TaxBreakdown;
+pub use nport::find_holding_by_ticker;
+pub use nport::find_holding_pct;
 
+use crate::sec_client::{FundInfo, SecClient};
 use nport::parse_nport_xml;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
-struct MfTickers {
-    #[allow(dead_code)]
-    fields: Vec<String>,
-    data: Vec<(u64, String, String, String)>, // cik, seriesId, classId, symbol
-}
-
-#[derive(Debug)]
-pub struct FundInfo {
-    pub cik: u64,
-    pub series_id: String,
-}
-
-pub async fn lookup_fund_info(
-    client: &reqwest::Client,
+/// Download the latest N-PORT XML for a fund ticker, using cache when possible.
+pub async fn download_nport_xml(
+    client: &SecClient,
     ticker: &str,
-) -> Result<FundInfo, Box<dyn std::error::Error>> {
-    let resp = client
-        .get("https://www.sec.gov/files/company_tickers_mf.json")
-        .header("Accept-Encoding", "gzip, deflate")
-        .send()
-        .await?;
+) -> Result<String, Box<dyn std::error::Error>> {
+    let fund = client.lookup_fund_info(ticker).await?;
+    let (accession, xml_url) = find_latest_nport(client, &fund).await?;
 
+    if let Some(xml) = crate::cache::get(ticker, &accession) {
+        return Ok(xml);
+    }
+
+    let resp = client.get(&xml_url).await?;
     if !resp.status().is_success() {
-        return Err(format!("SEC tickers API failed: {}", resp.status()).into());
+        return Err(format!("Failed to download N-PORT: {}", resp.status()).into());
     }
+    let xml = resp.text().await?;
 
-    let mf: MfTickers = resp.json().await?;
-    let ticker_upper = ticker.to_uppercase();
+    // Quick extract of report date for cache metadata (avoid full parse)
+    let report_date = extract_report_date(&xml);
+    crate::cache::put(ticker, &accession, &report_date, &xml);
 
-    for (cik, series_id, _class_id, symbol) in &mf.data {
-        if symbol.to_uppercase() == ticker_upper {
-            return Ok(FundInfo {
-                cik: *cik,
-                series_id: series_id.clone(),
-            });
-        }
-    }
+    Ok(xml)
+}
 
-    Err(format!("Ticker '{ticker}' not found in SEC mutual fund/ETF list").into())
+/// Download and parse the latest N-PORT into a tax breakdown.
+pub async fn lookup_tax_breakdown(
+    client: &SecClient,
+    ticker: &str,
+) -> Result<TaxBreakdown, Box<dyn std::error::Error>> {
+    let xml = download_nport_xml(client, ticker).await?;
+    parse_nport_xml(&xml)
 }
 
 async fn find_latest_nport(
-    client: &reqwest::Client,
+    client: &SecClient,
     fund: &FundInfo,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     let url = format!(
@@ -59,7 +53,7 @@ async fn find_latest_nport(
         fund.series_id
     );
 
-    let resp = client.get(&url).send().await?;
+    let resp = client.get(&url).await?;
     if !resp.status().is_success() {
         return Err(format!("EDGAR browse failed: {}", resp.status()).into());
     }
@@ -113,38 +107,20 @@ fn parse_atom_accession(xml: &str) -> Result<String, Box<dyn std::error::Error>>
     Err("No N-PORT filing found".into())
 }
 
-async fn download_nport(
-    client: &reqwest::Client,
-    xml_url: &str,
-) -> Result<TaxBreakdown, Box<dyn std::error::Error>> {
-    let resp = client.get(xml_url).send().await?;
-    if !resp.status().is_success() {
-        return Err(format!("Failed to download N-PORT: {}", resp.status()).into());
+/// Quick string-level extraction of repPdDate (avoids full XML parse).
+fn extract_report_date(xml: &str) -> String {
+    // Look for <repPdDate>YYYY-MM-DD</repPdDate> or namespaced variant
+    if let Some(start) = xml.find("repPdDate>") {
+        let after = &xml[start + "repPdDate>".len()..];
+        if let Some(end) = after.find('<') {
+            return after[..end].trim().to_string();
+        }
     }
-
-    let xml = resp.text().await?;
-    parse_nport_xml(&xml)
+    String::new()
 }
 
-pub async fn lookup_tax_breakdown(
-    client: &reqwest::Client,
-    ticker: &str,
-) -> Result<TaxBreakdown, Box<dyn std::error::Error>> {
-    eprintln!("Looking up fund info for {ticker}...");
-    let fund = lookup_fund_info(client, ticker).await?;
-    eprintln!(
-        "Found CIK {} series {} — finding latest N-PORT...",
-        fund.cik, fund.series_id
-    );
-
-    let (_accession, xml_url) = find_latest_nport(client, &fund).await?;
-    eprintln!("Downloading and parsing N-PORT...");
-
-    download_nport(client, &xml_url).await
-}
-
-/// Extract the local name from a potentially namespaced XML tag
-pub(crate) fn local_name(full: &[u8]) -> String {
+/// Extract the local name from a potentially namespaced XML tag.
+pub(super) fn local_name(full: &[u8]) -> String {
     let s = std::str::from_utf8(full).unwrap_or("");
     match s.rfind(':') {
         Some(i) => s[i + 1..].to_string(),
@@ -155,7 +131,10 @@ pub(crate) fn local_name(full: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_client;
+
+    fn test_sec_client() -> SecClient {
+        SecClient::new(crate::build_client())
+    }
 
     #[test]
     fn test_parse_atom_accession_valid() {
@@ -179,8 +158,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_fund_info_lookup() {
-        let client = build_client();
-        let fund = lookup_fund_info(&client, "IVV")
+        let client = test_sec_client();
+        let fund = client
+            .lookup_fund_info("IVV")
             .await
             .expect("Fund lookup failed");
         assert_eq!(fund.cik, 1100663);
@@ -189,14 +169,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_fund_info_not_found() {
-        let client = build_client();
-        let result = lookup_fund_info(&client, "ZZZZNOTREAL").await;
+        let client = test_sec_client();
+        let result = client.lookup_fund_info("ZZZZNOTREAL").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_tax_breakdown_treasury_fund() {
-        let client = build_client();
+        let client = test_sec_client();
         let b = lookup_tax_breakdown(&client, "IEF")
             .await
             .expect("Tax breakdown failed");
@@ -206,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tax_breakdown_muni_fund() {
-        let client = build_client();
+        let client = test_sec_client();
         let b = lookup_tax_breakdown(&client, "MUB")
             .await
             .expect("Tax breakdown failed");
